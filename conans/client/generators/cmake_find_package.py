@@ -41,6 +41,24 @@ class CMakeFindPackageGenerator(Generator):
                 {find_dependencies_block}
             endif()
         endif()
+        {find_components_block}
+        """)
+        
+    component_template = textwrap.dedent("""
+        if(NOT ${{CMAKE_VERSION}} VERSION_LESS "3.0")
+            # Target approach
+            if(NOT TARGET {name}::{component})
+                add_library({name}::{component} INTERFACE IMPORTED)
+                set_target_properties({name}::{component} PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
+                                      "{component_include_directories}")
+                set_property(TARGET {name}::{component} PROPERTY INTERFACE_LINK_DIRECTORIES
+                             "{component_link_directories}")
+                set_property(TARGET {name}::{component} PROPERTY INTERFACE_LINK_LIBRARIES
+                             "{component_link_libraries}")
+                set_property(TARGET {name}::{component} PROPERTY INTERFACE_COMPILE_DEFINITIONS
+                             "{component_defines}")
+            endif()
+        endif()
         """)
 
     @property
@@ -54,6 +72,27 @@ class CMakeFindPackageGenerator(Generator):
             depname = cpp_info.get_name("cmake_find_package")
             ret["Find%s.cmake" % depname] = self._find_for_dep(depname, cpp_info)
         return ret
+
+    def _render_component_template(self, name, comp_name, component):
+        component_requires = [
+          ("{}::{}".format(name, require) if "::" not in require else require)
+          for require in component.requires
+        ]
+        component_link_libraries = component_requires + component.libs + component.system_libs
+        print("component.defines = [{}]".format(component.defines))
+        return self.component_template.format(name=name, component=comp_name,
+                                              component_include_directories=";".join(component.includedirs),
+                                              component_link_directories=";".join(component.libdirs),
+                                              component_link_libraries=";".join(component_link_libraries),
+                                              component_defines=";".join(component.defines)
+        )
+
+    def _render_components(self, name, cpp_info):
+        tmp = ""
+        components = cpp_info._get_sorted_components()
+        for (comp_name, component) in components.items():
+            tmp += self._render_component_template(name, comp_name, component)
+        return tmp
 
     def _find_for_dep(self, name, cpp_info):
         # The common macros
@@ -78,6 +117,8 @@ class CMakeFindPackageGenerator(Generator):
         find_libraries_block = target_template.format(name=name, deps=deps, build_type_suffix="",
                                                       deps_names=deps_names)
 
+
+
         # The find_transitive_dependencies block
         find_dependencies_block = ""
         if dep_cpp_info.public_deps:
@@ -86,9 +127,13 @@ class CMakeFindPackageGenerator(Generator):
             # proper indentation
             find_dependencies_block = ''.join("        " + line if line.strip() else line
                                               for line in f.splitlines(True))
+        
+        find_components_block = self._render_components(name, cpp_info)
 
         tmp = self.find_template.format(name=name, version=dep_cpp_info.version,
                                         find_libraries_block=find_libraries_block,
                                         find_dependencies_block=find_dependencies_block,
-                                        macros_and_functions=macros_and_functions)
+                                        macros_and_functions=macros_and_functions,
+                                        find_components_block=find_components_block
+        )
         return tmp

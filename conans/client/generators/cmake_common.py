@@ -1,4 +1,5 @@
 import textwrap
+import collections
 
 _cmake_single_dep_vars = """
 #################
@@ -206,8 +207,103 @@ _target_template = """
                                                                   $<$<CONFIG:MinSizeRel>:${{CONAN_C_FLAGS_{uname}_MINSIZEREL_LIST}} ${{CONAN_CXX_FLAGS_{uname}_MINSIZEREL_LIST}}>
                                                                   $<$<CONFIG:Debug>:${{CONAN_C_FLAGS_{uname}_DEBUG_LIST}}  ${{CONAN_CXX_FLAGS_{uname}_DEBUG_LIST}}>)
 """
+_component_template = textwrap.dedent("""
+    if(NOT TARGET {name}::{component})
+        add_library({name}::{component} INTERFACE IMPORTED)
+        set_target_properties({name}::{component} PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
+                              "{component_include_directories}")
+        set_property(TARGET {name}::{component} PROPERTY INTERFACE_LINK_DIRECTORIES
+                      "{component_link_directories}")
+        set_property(TARGET {name}::{component} PROPERTY INTERFACE_LINK_LIBRARIES
+                      "{component_link_libraries}")
+        set_property(TARGET {name}::{component} PROPERTY INTERFACE_COMPILE_DEFINITIONS
+                      "{component_defines}")
+        set_property(TARGET {name}::{component} PROPERTY INTERFACE_COMPILE_OPTIONS
+                      "{component_options}")
+    endif()
+""")
 
+def _compute_require_target(target_pkgs, name, require):
+    target_pkg = name
+    target_comp = require
+    print("require = {}".format(require))
+    require_pattern = require.split("::", 1)
+    print("require_pattern = {}".format(require_pattern))
+    if len(require_pattern) > 1:
+        print("dependencies = {}".format(target_pkgs))
+        
+        print("pattern[0] = ".format(require_pattern[0]))
+        if require_pattern[0] not in target_pkgs:
+            raise Exception("...")
+          
+        target_pkg = target_pkgs[require_pattern[0]].get_name("cmake")
+        print("target_pkg = {}".format(target_pkg))
+        target_comp = require_pattern[1]
+        print("target_comp = {}".format(target_comp))
+        if require_pattern[0] == target_comp:
+            target_comp = target_pkg
 
+    return "{}::{}".format(target_pkg, target_comp)
+
+def _sorted_requires(sorted_components, requires):
+    sorted_requires = []
+    for require in requires:
+        if "::" in require:
+            sorted_requires.append(require)
+            
+    for comp_name, _ in reversed(list(sorted_components.items())):
+        print("search for {}".format(comp_name))
+        if comp_name in requires:
+            print("     comp_name = {}".format(comp_name))
+            sorted_requires.append(comp_name)
+    print("     sorted_requires = {}".format(sorted_requires))
+    return sorted_requires
+
+def _remove_duplicates_libraries(libraries):
+    print("_remove_duplicates_libraries = 1 => {}".format(libraries)) 
+    deduplicated = list(reversed(
+        collections.OrderedDict(
+            reversed([(name, name) for name in libraries])
+        ).keys())
+    )
+    print("_remove_duplicates_libraries = 2 => {}".format(deduplicated))
+    return deduplicated
+
+def _render_component_template(target_pkgs, sorted_components, name, comp_name, component):
+    component_requires = []
+    print("AAA: {}::{}".format(name, comp_name))
+    
+    print("     requires = {}".format(component.requires))
+    print("     sorted_components = {}".format(sorted_components))
+    if hasattr(component.requires, "__iter__"):
+        component_requires = [
+          _compute_require_target(target_pkgs, name, require) for require in _sorted_requires(sorted_components, set(component.requires))
+        ]
+    print("BBB: {}".format(component_requires))
+    component_link_libraries = _remove_duplicates_libraries(component.libs + component_requires + component.system_libs)
+    print("CCC: for {} => {} ".format(comp_name, component_link_libraries))
+    component_options = component.cflags + component.cxxflags
+    component_include_directories = component.include_paths #[path if os.path.isabs(path) else ?!+path for path in component.includedirs]
+    component_link_directories = component.lib_paths #[path if os.path.isabs(path) else ?!+path for path in component.libdirs]
+    return _component_template.format(name=name, component=comp_name,
+                                          component_include_directories=";".join(component_include_directories),
+                                          component_link_directories=";".join(component_link_directories),
+                                          component_link_libraries=";".join(component_link_libraries),
+                                          component_defines=";".join(component.defines),
+                                          component_options=";".join(component_options)
+    )
+    
+def _render_components(target_pkgs, dep_name, cpp_info):
+    tmp = ""
+    #components = collections.OrderedDict(reversed(list(cpp_info._get_sorted_components().items())))
+    sorted_components = cpp_info._get_sorted_components()
+    if len(sorted_components) > 0:
+        for (comp_name, component) in sorted_components.items():
+            tmp += _render_component_template(target_pkgs, sorted_components, dep_name, comp_name, component)
+    else:
+        tmp += _render_component_template(target_pkgs, sorted_components, dep_name, dep_name, cpp_info)
+    return tmp
+        
 def generate_targets_section(dependencies, generator_name):
     section = []
     section.append("\n###  Definition of macros and functions ###\n")
@@ -228,6 +324,17 @@ def generate_targets_section(dependencies, generator_name):
 
     all_targets = " ".join(["CONAN_PKG::%s" % dep_info.get_name(generator_name) for _, dep_info in dependencies])
     section.append('    set(CONAN_TARGETS %s)\n' % all_targets)
+
+
+    ################################################################################
+    ## Components...
+    ################################################################################
+
+    for dep_name, dep_info in dependencies:
+        print("dep_name = {}".format(dep_name))
+        dep_name = dep_info.get_name(generator_name)
+        section.append(_render_components(dependencies_dict, dep_name, dep_info))
+
     section.append('endmacro()\n')
     return section
 
